@@ -1,0 +1,5 @@
+{
+    "name": "RSPH.Runtime",
+    "rootNamespace": "RSPH",
+    "autoReferenced": true
+}

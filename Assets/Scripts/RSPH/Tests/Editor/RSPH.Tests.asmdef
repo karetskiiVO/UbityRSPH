@@ -1,0 +1,7 @@
+{
+    "name": "RSPH.Tests",
+    "rootNamespace": "RSPH.Tests",
+    "references": ["RSPH.Runtime"],
+    "includePlatforms": ["Editor"],
+    "optionalUnityReferences": ["TestAssemblies"]
+}

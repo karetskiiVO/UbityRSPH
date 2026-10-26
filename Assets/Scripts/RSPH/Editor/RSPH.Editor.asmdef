@@ -1,0 +1,6 @@
+{
+    "name": "RSPH.Editor",
+    "rootNamespace": "RSPH.Editor",
+    "references": ["RSPH.Runtime"],
+    "includePlatforms": ["Editor"]
+}

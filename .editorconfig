@@ -1,0 +1,44 @@
+# EditorConfig для C# проектов
+root = true
+
+[*]
+charset = utf-8
+end_of_line = crlf
+indent_size = 4
+indent_style = space
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.cs]
+# Общие настройки форматирования
+dotnet_sort_system_directives_first = true
+dotnet_separate_import_directive_groups = true
+
+# Настройки для фигурных скобок - НЕ ПЕРЕНОСИТЬ!
+csharp_new_line_before_open_brace = false
+csharp_new_line_before_else = false
+csharp_new_line_before_catch = false
+csharp_new_line_before_finally = false
+csharp_new_line_before_members_in_object_initializers = false
+csharp_new_line_before_members_in_anonymous_types = false
+csharp_new_line_between_query_expression_clauses = false
+csharp_style_prefer_top_level_type_constraint_separate_line = true
+
+# Дополнительные настройки для блоков
+csharp_preserve_single_line_blocks = true
+csharp_preserve_single_line_statements = true
+
+# Настройки для методов и свойств
+csharp_new_line_before_expression_body_method = false
+csharp_new_line_before_expression_body_property = false
+csharp_new_line_before_expression_body_indexer = false
+csharp_new_line_before_expression_body_accessor = false
+
+# Настройки для различных конструкций
+csharp_new_line_before_catch = false
+csharp_new_line_before_else = false
+csharp_new_line_before_finally = false
+csharp_new_line_before_members_in_anonymous_types = false
+csharp_new_line_before_members_in_object_initializers = false
+csharp_new_line_before_open_brace = false
+csharp_new_line_between_query_expression_clauses = false

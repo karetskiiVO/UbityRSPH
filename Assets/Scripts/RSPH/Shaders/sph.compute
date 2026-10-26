@@ -1,0 +1,246 @@
+#pragma kernel Initialize
+#pragma kernel ClearGrid
+#pragma kernel BuildGrid
+#pragma kernel ScanCells
+#pragma kernel AddBlockOffsets
+#pragma kernel ScatterParticles
+#pragma kernel CalculateDensityPressure
+#pragma kernel CalculateForces
+#pragma kernel Integrate
+
+#include "types.hlsl"
+#include "utils.hlsl"
+
+RWStructuredBuffer<Particle> _Particles;
+StructuredBuffer<Particle> _ParticlesRead;
+RWStructuredBuffer<Particle> _SortedParticles;
+RWStructuredBuffer<float2> _DensityPressure;
+RWStructuredBuffer<float4> _Forces;
+RWStructuredBuffer<uint> _CellCounts;
+RWStructuredBuffer<uint> _CellStarts;
+RWStructuredBuffer<uint> _ParticleSlots;
+StructuredBuffer<uint> _ScanInput;
+RWStructuredBuffer<uint> _ScanOutput;
+RWStructuredBuffer<uint> _ScanSums;
+StructuredBuffer<uint> _ParentOffsets;
+uint _ScanCount;
+groupshared uint scanShared[256];
+
+uint _ParticleCount;
+uint _CellCount;
+int3 _GridSize;
+int3 _SpawnCounts;
+float3 _SpawnOrigin;
+float _ParticleSpacing;
+float3 _BoundsMin;
+float3 _BoundsMax;
+float3 _Gravity;
+float _SmoothingRadius;
+float _ParticleRadius;
+float _ParticleMass;
+float _RestDensity;
+float _PressureStiffness;
+float _Viscosity;
+float _BoundaryDamping;
+float _MaxSpeed;
+float _DeltaTime;
+
+int3 GetCell(float3 position)
+{
+    return clamp((int3)floor((position - _BoundsMin) / _SmoothingRadius), 0, _GridSize - 1);
+}
+
+int FlattenCell(int3 cell)
+{
+    return cell.x + _GridSize.x * (cell.y + _GridSize.y * cell.z);
+}
+
+bool ValidCell(int3 cell)
+{
+    return all(cell >= 0) && all(cell < _GridSize);
+}
+
+[numthreads(256, 1, 1)]
+void Initialize(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    if (i >= _ParticleCount) return;
+    uint3 lattice = uint3(i % _SpawnCounts.x, (i / _SpawnCounts.x) % _SpawnCounts.y,
+        i / (_SpawnCounts.x * _SpawnCounts.y));
+    Particle p;
+    p.position = float4(_SpawnOrigin + lattice * _ParticleSpacing, 0);
+    p.velocity = 0;
+    _Particles[i] = p;
+}
+
+[numthreads(256, 1, 1)]
+void ClearGrid(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x >= _CellCount) return;
+    _CellCounts[tid.x] = 0;
+}
+
+[numthreads(256, 1, 1)]
+void BuildGrid(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    if (i >= _ParticleCount) return;
+    uint slot;
+    InterlockedAdd(_CellCounts[FlattenCell(GetCell(_ParticlesRead[i].position.xyz))], 1, slot);
+    _ParticleSlots[i] = slot;
+}
+
+[numthreads(256, 1, 1)]
+void ScanCells(uint3 tid : SV_DispatchThreadID, uint3 group : SV_GroupID, uint local : SV_GroupIndex)
+{
+    scanShared[local] = tid.x < _ScanCount ? _ScanInput[tid.x] : 0;
+    GroupMemoryBarrierWithGroupSync();
+    for (uint stride = 1; stride < 256; stride <<= 1)
+    {
+        uint index = (local + 1) * stride * 2 - 1;
+        if (index < 256) scanShared[index] += scanShared[index - stride];
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (local == 255)
+    {
+        _ScanSums[group.x] = scanShared[255];
+        scanShared[255] = 0;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    for (uint stride = 128; stride > 0; stride >>= 1)
+    {
+        uint index = (local + 1) * stride * 2 - 1;
+        if (index < 256)
+        {
+            uint value = scanShared[index - stride];
+            scanShared[index - stride] = scanShared[index];
+            scanShared[index] += value;
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (tid.x < _ScanCount) _ScanOutput[tid.x] = scanShared[local];
+}
+
+[numthreads(256, 1, 1)]
+void AddBlockOffsets(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x >= _ScanCount) return;
+    _ScanOutput[tid.x] += _ParentOffsets[tid.x / 256];
+}
+
+[numthreads(256, 1, 1)]
+void ScatterParticles(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    if (i >= _ParticleCount) return;
+    Particle p = _ParticlesRead[i];
+    uint cell = FlattenCell(GetCell(p.position.xyz));
+    _SortedParticles[_CellStarts[cell] + _ParticleSlots[i]] = p;
+}
+
+[numthreads(256, 1, 1)]
+void CalculateDensityPressure(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    if (i >= _ParticleCount) return;
+    float3 position = _ParticlesRead[i].position.xyz;
+    int3 cell = GetCell(position);
+    float density = 0;
+    // Three adjacent x cells form one contiguous range; only 9 row queries.
+    for (int z = -1; z <= 1; z++)
+    for (int y = -1; y <= 1; y++)
+    {
+        int3 neighborCell = int3(max(cell.x - 1, 0), cell.y + y, cell.z + z);
+        if (!ValidCell(neighborCell)) continue;
+        uint first = _CellStarts[FlattenCell(neighborCell)];
+        neighborCell.x = min(cell.x + 1, _GridSize.x - 1);
+        uint lastCell = FlattenCell(neighborCell);
+        uint end = _CellStarts[lastCell] + _CellCounts[lastCell];
+        for (uint j = first; j < end; j++)
+        {
+            float3 delta = position - _ParticlesRead[j].position.xyz;
+            density += _ParticleMass * Poly6(dot(delta, delta), _SmoothingRadius);
+        }
+    }
+    density = max(density, _RestDensity * 0.01);
+    // Clamping tensile pressure prevents unstable attraction at the free surface.
+    float pressure = _PressureStiffness * max(density - _RestDensity, 0.0);
+    _DensityPressure[i] = float2(density, pressure);
+}
+
+[numthreads(256, 1, 1)]
+void CalculateForces(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    if (i >= _ParticleCount) return;
+    Particle p = _ParticlesRead[i];
+    float2 own = _DensityPressure[i];
+    int3 cell = GetCell(p.position.xyz);
+    float3 acceleration = _Gravity;
+    float h = _SmoothingRadius;
+    for (int z = -1; z <= 1; z++)
+    for (int y = -1; y <= 1; y++)
+    {
+        int3 neighborCell = int3(max(cell.x - 1, 0), cell.y + y, cell.z + z);
+        if (!ValidCell(neighborCell)) continue;
+        uint first = _CellStarts[FlattenCell(neighborCell)];
+        neighborCell.x = min(cell.x + 1, _GridSize.x - 1);
+        uint lastCell = FlattenCell(neighborCell);
+        uint end = _CellStarts[lastCell] + _CellCounts[lastCell];
+        for (uint j = first; j < end; j++)
+        {
+            if ((uint)j != i)
+            {
+                Particle neighbor = _ParticlesRead[j];
+                float3 delta = p.position.xyz - neighbor.position.xyz;
+                float distanceSquared = dot(delta, delta);
+                if (distanceSquared < h * h && distanceSquared > 1e-12)
+                {
+                    float distance = sqrt(distanceSquared);
+                    float2 other = _DensityPressure[j];
+                    float3 gradient = SpikyGradientScale(distance, h) * delta / distance;
+                    acceleration -= _ParticleMass * (own.y / (own.x * own.x) +
+                        other.y / (other.x * other.x)) * gradient;
+                    // Symmetric density denominator conserves pair momentum.
+                    acceleration += _Viscosity * _ParticleMass * 2.0 / (own.x + other.x) *
+                        (neighbor.velocity.xyz - p.velocity.xyz) * ViscosityLaplacian(distance, h);
+                }
+            }
+        }
+    }
+    _Forces[i] = float4(acceleration, 0);
+}
+
+void CollideAxis(inout float position, inout float velocity, float lower, float upper)
+{
+    if (position < lower)
+    {
+        position = lower;
+        if (velocity < 0) velocity *= -_BoundaryDamping;
+    }
+    if (position > upper)
+    {
+        position = upper;
+        if (velocity > 0) velocity *= -_BoundaryDamping;
+    }
+}
+
+[numthreads(256, 1, 1)]
+void Integrate(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    if (i >= _ParticleCount) return;
+    Particle p = _ParticlesRead[i];
+    float3 velocity = p.velocity.xyz + _Forces[i].xyz * _DeltaTime;
+    float speed = length(velocity);
+    velocity *= min(1.0, _MaxSpeed / max(speed, 1e-6));
+    float3 position = p.position.xyz + velocity * _DeltaTime;
+    float3 lower = _BoundsMin + _ParticleRadius;
+    float3 upper = _BoundsMax - _ParticleRadius;
+    CollideAxis(position.x, velocity.x, lower.x, upper.x);
+    CollideAxis(position.y, velocity.y, lower.y, upper.y);
+    CollideAxis(position.z, velocity.z, lower.z, upper.z);
+    p.position = float4(position, 0);
+    p.velocity = float4(velocity, 0);
+    _Particles[i] = p;
+}

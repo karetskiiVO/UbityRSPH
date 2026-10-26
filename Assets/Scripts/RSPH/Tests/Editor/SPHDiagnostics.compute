@@ -1,0 +1,19 @@
+#pragma kernel ValidateParticles
+#include "../../Shaders/types.hlsl"
+
+StructuredBuffer<Particle> _Particles;
+RWStructuredBuffer<uint> _Stats;
+uint _ParticleCount;
+float3 _HalfBounds;
+float _MaxSpeed;
+
+[numthreads(256, 1, 1)]
+void ValidateParticles(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x >= _ParticleCount) return;
+    Particle p = _Particles[tid.x];
+    if (any(isnan(p.position.xyz)) || any(isinf(p.position.xyz))) InterlockedAdd(_Stats[0], 1);
+    if (any(abs(p.position.xyz) > _HalfBounds + 0.00001)) InterlockedAdd(_Stats[1], 1);
+    if (any(isnan(p.velocity.xyz)) || any(isinf(p.velocity.xyz))) InterlockedAdd(_Stats[2], 1);
+    if (length(p.velocity.xyz) > _MaxSpeed + .001) InterlockedAdd(_Stats[3], 1);
+}
